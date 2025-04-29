@@ -11,7 +11,7 @@ chomp($input);
 
 # Taint mode will flag this as unsafe
 # unless we "untaint" it by validating and extracting it
-($input =~ m{^(.*)$}) ? $input = $1 : die "Invalid input: potential security risk.\n";
+if ($input =~ m{^(.*)$}) { $input = $1 }
 print "Listing files in: $input\n";
 system("ls", "-l", $input);
 
