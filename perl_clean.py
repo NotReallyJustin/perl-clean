@@ -1,4 +1,7 @@
 import re
+import sys
+import argparse
+import subprocess
 
 # Note: cwd will always be the user's cwd
 
@@ -148,9 +151,24 @@ def map_variables(perl_lines: list[tuple[int, str]]) -> dict[str, list[int]]:
 
 # A good way to test map_variables to once again, run it on `./test_clean.pl`
 print(map_variables(decompose_code("./test_clean.pl")))
-    
+
+def taint_check(perl_filename: str) -> str:
+    command = ["perl", "-T", perl_filename]
+    result = subprocess.run(command, capture_output=True, stdin=subprocess.DEVNULL)
+    print("return:", result.returncode)
+    print("stdout:", result.stdout)
+    print("stderr:", result.stderr)
+    return str(result.stderr)
+
+def runner(perl_filename: str):
+    while len(taint_check(perl_filename)) != 0:
+        break
+    return
+
 # ---- Main processing code ------
 def main():
-    pass
+    runner(sys.argv[1])
 
 # Command Line Interface
+if __name__ == "__main__":
+    main()
