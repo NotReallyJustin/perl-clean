@@ -112,7 +112,7 @@ def extract_vars(perl_line:str) -> list[str]:
 
 # # These are very good test strings to see if extract_vars is working correctly
 # # Should return ['$arg', '$arg2', '$arg3']
-# print(extract_vars('$arg = shift;	\#	$arg2 . "and a string with # inside $arg3" # $arg4 is tainted'))
+# print(extract_vars('$arg = shift;	\\#	$arg2 . "and a string with # inside $arg3" # $arg4 is tainted'))
 
 # # Should return ['$sudo', '$cat', '$etcpasswd']
 # print(extract_vars('exec "sh -c $sudo $cat # $etcpasswd" # $sillyvarnoonecaresabout'))
