@@ -1,5 +1,6 @@
 import re
 import sys
+import os
 import argparse
 import subprocess
 
@@ -150,8 +151,58 @@ def map_variables(perl_lines: list[tuple[int, str]]) -> dict[str, list[int]]:
 
 
 # A good way to test map_variables to once again, run it on `./test_clean.pl`
-print(map_variables(decompose_code("./test_clean.pl")))
+# print(map_variables(decompose_code("./test_clean.pl")))
 
+# --------------- Helper Util Functions -------------------------------------------
+def create_shadow_file(perl_filepath: str, prepends: list[tuple[int, str]], postpends: list[str]) -> str:
+    '''
+    Creates a (cloned) shadow file with certain prepended strings in front of certain lines and postpended strings after the file
+    @param perl_filepath The file path of the original file to create a clone/shadow file of
+    @param prepends A list of tuples ($line, $str). Prepend $str in front of $line
+    @param postpends A list of strings to add at the end of the file.
+    '''
+    shadow_file_name = "perl_clean_shadow.pl"
+    # Assertion check to make sure that we're not overwriting an existing shadow file
+    assert not os.path.exists(shadow_file_name), f"Shadow file {shadow_file_name} already exists. Make sure you get rid of that."
+
+    # Can't have something names
+    # Clone the file. Split it by line
+    read_output = []
+    with open(perl_filepath) as file:
+        read_output = file.readlines()
+
+    # Prepend
+    for (line, code) in prepends:
+        # -1 because line # --> read output
+        read_output_idx = line - 1
+
+        # Seperate multiple code statements on one line with ;. 
+        # If $code already has ;, nothing happens and ig Perl just executes an empty statement which doesn't hurt us
+        read_output[read_output_idx] = f"{code}; {read_output[read_output_idx]}"    
+
+    # Postpend
+    read_output[:-1] += "\n"        # Add a new line to the end of the last line in the file
+    for code in postpends:
+        # Write_lines is funny. You need to add \n
+        read_output.append(f"{code}\n")
+
+    # Write to shadow file
+    with open(shadow_file_name, "w") as shadow_file:
+        shadow_file.writelines(read_output)
+
+# Here's a good check for creating shadow files.
+# Looks silly, but this completely sanitizes redact.pl
+# create_shadow_file("./redact.pl", [
+#     (5, "$ENV{PATH} = '/usr/bin:/bin';  # Safe, minimal PATH"),
+#     (8, "# Here's a comment on line 8 that normally isn't supposed to be here"),
+#     (18, "if ($file =~ m{^(.*)$}) { $file = $1 }"),
+#     (18, "if ($new_owner =~ m{^(.*)$}) { $new_owner = $1 }")
+# ], [
+#     'print "Postpend is working!\\n";',
+#     'print "Just putting another postpend in stuff\\n";'
+# ])
+
+# --------------- Taint Check for a perl file --------------------------------------
 def taint_check(perl_filename: str) -> str:
     command = ["perl", "-T", perl_filename]
     result = subprocess.run(command, capture_output=True, stdin=subprocess.DEVNULL)
@@ -159,6 +210,8 @@ def taint_check(perl_filename: str) -> str:
     print("stdout:", result.stdout)
     print("stderr:", result.stderr)
     return str(result.stderr)
+
+# ---------------------------------------------------------------------------------
 
 def runner(perl_filename: str):
     while len(taint_check(perl_filename)) != 0:
