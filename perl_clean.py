@@ -4,6 +4,9 @@ import os
 import argparse
 import subprocess
 
+shadow_file_name = "perl_clean_shadow.pl"           # This one is used in the runner
+shadow_file_test_name = "perl_clean_test.pl"        # This one is used by the error parsers to figure out the exact errors we're dealing with
+
 # Note: cwd will always be the user's cwd
 
 # ---- Util Functions -----------
@@ -54,6 +57,30 @@ def filter_comments(perl_line: str) -> str:
     split_idx = find_split_idx(perl_line, "#")
     return perl_line[0:split_idx]
 
+def invert_map(map: dict[str, list[int]]) -> dict[int, list[str]]:
+    '''
+    Inverts/Reverses a map by swapping the indexes and values.
+    For example, {"$hi": [1], "$bye": [1, 2]} --> {1: ["$hi"], 2: ["$hi, bye"]}
+    @params map The map to reverse
+    @returns The reversed map
+    '''
+    reversed_map = dict()
+
+    for key, value_list in map.items():
+        for value in value_list:
+            
+            # If the map entry doesn't exist yet, create one and set the value to an empty list
+            if (not (value in reversed_map)):
+                reversed_map[value] = []
+
+            # Avoid adding duplicates
+            if (not (key in reversed_map[value])):
+                reversed_map[value] += [key]
+
+    # To make UI easier down the line, sort the reversed map
+    # Python uses quick sort so we're good
+    reversed_map = dict(sorted(reversed_map.items()))
+    return reversed_map
 
 # ---- Perl file processing -------
 def decompose_code(perl_path: str) -> list[tuple[int, str]]:
@@ -154,16 +181,16 @@ def map_variables(perl_lines: list[tuple[int, str]]) -> dict[str, list[int]]:
 # print(map_variables(decompose_code("./test_clean.pl")))
 
 # --------------- Helper Util Functions -------------------------------------------
-def create_shadow_file(perl_filepath: str, prepends: list[tuple[int, str]], postpends: list[str]) -> str:
+def create_shadow_file(perl_filepath: str, prepends: list[tuple[int, str]], postpends: list[str], filename:str=shadow_file_name) -> str:
     '''
     Creates a (cloned) shadow file with certain prepended strings in front of certain lines and postpended strings after the file
     @param perl_filepath The file path of the original file to create a clone/shadow file of
     @param prepends A list of tuples ($line, $str). Prepend $str in front of $line
     @param postpends A list of strings to add at the end of the file.
+    @param filename The file name of the shadow file. By default, this is $perl_clean_shadow global var
     '''
-    shadow_file_name = "perl_clean_shadow.pl"
     # Assertion check to make sure that we're not overwriting an existing shadow file
-    assert not os.path.exists(shadow_file_name), f"Shadow file {shadow_file_name} already exists. Make sure you get rid of that."
+    assert not os.path.exists(filename), f"Shadow file {filename} already exists. Make sure you get rid of that."
 
     # Can't have something names
     # Clone the file. Split it by line
@@ -187,7 +214,7 @@ def create_shadow_file(perl_filepath: str, prepends: list[tuple[int, str]], post
         read_output.append(f"{code}\n")
 
     # Write to shadow file
-    with open(shadow_file_name, "w") as shadow_file:
+    with open(filename, "w") as shadow_file:
         shadow_file.writelines(read_output)
 
 # Here's a good check for creating shadow files.
@@ -202,25 +229,85 @@ def create_shadow_file(perl_filepath: str, prepends: list[tuple[int, str]], post
 #     'print "Just putting another postpend in stuff\\n";'
 # ])
 
+# --------------- Taint Check Functionality ---------------------------------------
+def parse_err(taint_error:str, var_to_lines:dict[str, list[int]], line_to_vars:dict[int, list[str]]) -> str:
+    '''
+    Handles taint check results and sanitizes them. This will modify the shadow file.
+    @param taint_error The taint error returned by Perl
+    @param var_to_lines Mapping of variable name --> line number. Created when you analyze the initial Perl file
+    @param line_to_vars Mapping of line number --> variable name. Created when you analyze the initial perl file
+    @returns A string detailing the Perl error we currently have
+    '''
+    tainted_var_regex = r"Insecure dependency .*line .+\."
+
+    # Check for tainted variables
+    if(re.search(tainted_var_regex, taint_error)):
+        handle_tainted_var(taint_error, var_to_lines, line_to_vars)
+
+def handle_tainted_var(taint_error:str, var_to_lines:dict[str, list[int]], line_to_vars:dict[int, list[str]]) -> str:
+    '''
+    Tracks down a tainted variable.
+    @param taint_error The taint error returned by Perl
+    @param var_to_lines Mapping of variable name --> line number. Created when you analyze the initial Perl file
+    @param line_to_vars Mapping of line number --> variable name. Created when you analyze the initial perl file
+    @returns A string that's going to be sent to the user detailing all instances of the tainted variable
+    '''
+
+    # Use regexp to extract the line that is tainted from the variable
+    tainted_var_regex = r"Insecure dependency .*line .+\."
+    taint_err_group = re.search(tainted_var_regex, taint_error).group(0)
+    tainted_line = int(taint_err_group[taint_err_group.index("line ") + 5 :taint_err_group.index(".", taint_err_group.index("line "))])
+
+    # Find possible tainted variables on that line
+    possibly_tainted = line_to_vars[tainted_line]
+    
+    # Create another shadow file to mess with
+    # Include prepends and postpends on that specific line in order to track down the suspicious variables
+
+    print(f"Perl taint found on line {tainted_line}")
+    print(f"These variables are likely tainted: {possibly_tainted}")
+
 # --------------- Taint Check for a perl file --------------------------------------
-def taint_check(perl_filename: str) -> str:
-    command = ["perl", "-T", perl_filename]
+def taint_check(perl_filename: str, perl_params: list[str]) -> str:
+    command = ["perl", "-T", perl_filename] + perl_params
     result = subprocess.run(command, capture_output=True, stdin=subprocess.DEVNULL)
-    print("return:", result.returncode)
-    print("stdout:", result.stdout)
-    print("stderr:", result.stderr)
+    # print("return:", result.returncode)
+    # print("stdout:", result.stdout)
+    # print("stderr:", result.stderr)
     return str(result.stderr)
 
 # ---------------------------------------------------------------------------------
 
-def runner(perl_filename: str):
-    while len(taint_check(perl_filename)) != 0:
+def runner(perl_filename: str, perl_params: list[str], var_to_lines:dict[str, list[int]], line_to_vars:dict[int, list[str]]):
+    taint_err = taint_check(perl_filename, perl_params)
+    while len(taint_err) != 0:
+
+        # Check taint
+        taint_err_cleaned = taint_err
+        parse_err(taint_err_cleaned, var_to_lines, line_to_vars)
+        
+        # Recreate the shadow file with the new changes
+        os.remove(shadow_file_name)
+        # # create_shadow_file(shadow_file_name, [], [])
+
+        # # Recalculate taint
+        # taint_err = taint_check(perl_filename, perl_params)
         break
     return
 
 # ---- Main processing code ------
 def main():
-    runner(sys.argv[1])
+
+    # First, parse the perl file to construct a map of variable_names --> line_number
+    # At the same time, also construct a map of line_number --> variable_names
+    var_to_lines = map_variables(decompose_code(sys.argv[1]))
+    line_to_vars = invert_map(var_to_lines)
+
+    # Now that we're done parsing the file, we can try testing it. Create a shadow file
+    create_shadow_file(sys.argv[1], [], [])
+
+    # Run it
+    runner(shadow_file_name, sys.argv[2:], var_to_lines, line_to_vars)
 
 # Command Line Interface
 if __name__ == "__main__":
