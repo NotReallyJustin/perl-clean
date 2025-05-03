@@ -168,11 +168,10 @@ def map_variables(perl_lines: list[tuple[int, str]]) -> dict[str, list[int]]:
         variables_in_curr_line = extract_vars(code)
 
         for variable in variables_in_curr_line:
-            if variable in mapping:
+            if not(variable in mapping):
+                mapping[variable] = []
+            if not(line_num in mapping[variable]):       # Prevent duplicates
                 mapping[variable] += [line_num]
-            else:
-                # If there's no entry in mapping yet, make a list in the mapping with their line in it
-                mapping[variable] = [line_num]
 
     return mapping
 
@@ -230,26 +229,30 @@ def create_shadow_file(perl_filepath: str, prepends: list[tuple[int, str]], post
 # ])
 
 # --------------- Taint Check Functionality ---------------------------------------
-def parse_err(taint_error:str, var_to_lines:dict[str, list[int]], line_to_vars:dict[int, list[str]]) -> str:
+def parse_err(taint_error:str, var_to_lines:dict[str, list[int]], line_to_vars:dict[int, list[str]], perl_params:list[str]) -> str:
     '''
     Handles taint check results and sanitizes them. This will modify the shadow file.
     @param taint_error The taint error returned by Perl
     @param var_to_lines Mapping of variable name --> line number. Created when you analyze the initial Perl file
     @param line_to_vars Mapping of line number --> variable name. Created when you analyze the initial perl file
+    @param perl_params Params for running the Perl file. We need this to replicate the exact execution path
     @returns A string detailing the Perl error we currently have
     '''
     tainted_var_regex = r"Insecure dependency .*line .+\."
 
     # Check for tainted variables
     if(re.search(tainted_var_regex, taint_error)):
-        handle_tainted_var(taint_error, var_to_lines, line_to_vars)
+        return handle_tainted_var(taint_error, var_to_lines, line_to_vars, perl_params)
 
-def handle_tainted_var(taint_error:str, var_to_lines:dict[str, list[int]], line_to_vars:dict[int, list[str]]) -> str:
+    return "perl_clean.py: Something went wrong in parse_err(). This taint error is probably not handled yet."
+
+def handle_tainted_var(taint_error:str, var_to_lines:dict[str, list[int]], line_to_vars:dict[int, list[str]], perl_params:list[str]) -> str:
     '''
     Tracks down a tainted variable.
     @param taint_error The taint error returned by Perl
     @param var_to_lines Mapping of variable name --> line number. Created when you analyze the initial Perl file
     @param line_to_vars Mapping of line number --> variable name. Created when you analyze the initial perl file
+    @param perl_params Parameters for running the Perl file
     @returns A string that's going to be sent to the user detailing all instances of the tainted variable
     '''
 
@@ -260,12 +263,53 @@ def handle_tainted_var(taint_error:str, var_to_lines:dict[str, list[int]], line_
 
     # Find possible tainted variables on that line
     possibly_tainted = line_to_vars[tainted_line]
-    
-    # Create another shadow file to mess with
-    # Include prepends and postpends on that specific line in order to track down the suspicious variables
+    # print(f"Perl taint found on line {tainted_line}")
+    # print(f"These variables are likely tainted: {possibly_tainted}")
 
-    print(f"Perl taint found on line {tainted_line}")
-    print(f"These variables are likely tainted: {possibly_tainted}")
+    # *** Now, run tainted() on each variable to see which ones are tainted
+    # Prepend the taint_str payload before the line. Read stdin to see what's wrong
+    taint_str = "use Scalar::Util qw(tainted); say STDERR \"delinstart\";"
+    for var in possibly_tainted:            # Test each var
+        taint_str += f"tainted({var}) ? say STDERR \"tainted\" : say STDERR \"untainted\";"
+    taint_str += "say STDERR \"delinend\";"
+    
+    # Create a secondary shadow file to mess with
+    # Include prepends and postpends on that specific line in order to track down the suspicious variables
+    create_shadow_file(shadow_file_name, [(tainted_line, taint_str)], [], shadow_file_test_name)
+
+    # Run it and parse feedback
+    stderr = taint_check(shadow_file_test_name, perl_params).replace("b'", "").split("\\n")
+    feedback = stderr[stderr.index("delinstart") + 1 : stderr.index("delinend")]
+    
+    # The indexes in $feedback directly match up with the index in $possibly_tainted
+    # Use this fact to discover which variables are ACTUALLY tainted
+    tainted_vars = []
+    for i in range(len(feedback)):
+        if feedback[i] == "tainted":
+            tainted_vars.append(possibly_tainted[i])
+
+    # print(f"These vars are tainted in line {tainted_line}: {tainted_vars}")
+    
+    # Write a temporary de-tainting script to shadow file for that variable so we can move on and detect other taints
+    # We're basically going to write to a new shadow test file, and make that shadow test file the actual shadow file since force writing is finnicky
+    detainting_scripts = ""
+    for var in tainted_vars:
+        detainting_scripts += "if ($input =~ m{^(.*)$}) { $input = $1 };".replace("$input", var)
+    
+    os.remove(shadow_file_test_name)
+    create_shadow_file(shadow_file_name, [(tainted_line, detainting_scripts)], [], shadow_file_test_name)
+    os.remove(shadow_file_name)
+    os.rename(shadow_file_test_name, shadow_file_name)
+
+    # Write an executive summary
+    summary = ""
+    for var in tainted_vars:
+        summary += f"--------------\nTainted variable {var} found in line {tainted_line}.\n{var} The taint is also found in the following lines: "
+        summary += str(var_to_lines[var])
+        summary += "\n"
+        
+    return summary
+
 
 # --------------- Taint Check for a perl file --------------------------------------
 def taint_check(perl_filename: str, perl_params: list[str]) -> str:
@@ -284,11 +328,9 @@ def runner(perl_filename: str, perl_params: list[str], var_to_lines:dict[str, li
 
         # Check taint
         taint_err_cleaned = taint_err
-        parse_err(taint_err_cleaned, var_to_lines, line_to_vars)
-        
-        # Recreate the shadow file with the new changes
-        os.remove(shadow_file_name)
-        # # create_shadow_file(shadow_file_name, [], [])
+        taint_err_msg = parse_err(taint_err_cleaned, var_to_lines, line_to_vars, perl_params)
+
+        print(taint_err_msg)
 
         # # Recalculate taint
         # taint_err = taint_check(perl_filename, perl_params)
