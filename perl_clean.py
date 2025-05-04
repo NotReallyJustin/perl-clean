@@ -239,12 +239,17 @@ def parse_err(taint_error:str, var_to_lines:dict[str, list[int]], line_to_vars:d
     @returns A string detailing the Perl error we currently have
     '''
     tainted_var_regex = r"Insecure dependency .*line .+\."
+    tainted_env_regex = r"Insecure \$ENV{.*line.+\."
 
     # Check for tainted variables
     if(re.search(tainted_var_regex, taint_error)):
         return handle_tainted_var(taint_error, var_to_lines, line_to_vars, perl_params)
+    
+    # Check for tainted environment variabkes
+    if (re.search(tainted_env_regex, taint_error)):
+        return handle_tainted_env(taint_error, var_to_lines, line_to_vars, perl_params)
 
-    return "perl_clean.py: Something went wrong in parse_err(). This taint error is probably not handled yet."
+    assert 0 == 1, f"perl_clean.py: Something went wrong in parse_err(). This taint error is probably not handled yet.\nError message: {taint_error}"
 
 def handle_tainted_var(taint_error:str, var_to_lines:dict[str, list[int]], line_to_vars:dict[int, list[str]], perl_params:list[str]) -> str:
     '''
@@ -306,10 +311,45 @@ def handle_tainted_var(taint_error:str, var_to_lines:dict[str, list[int]], line_
     for var in tainted_vars:
         summary += f"--------------\nTainted variable {var} found in line {tainted_line}.\n{var} The taint is also found in the following lines: "
         summary += str(var_to_lines[var])
-        summary += "\n"
         
     return summary
 
+def handle_tainted_env(taint_error:str, var_to_lines:dict[str, list[int]], line_to_vars:dict[int, list[str]], perl_params:list[str]) -> str:
+    '''
+    Tracks down a tainted environment variable.
+    @param taint_error The taint error returned by Perl
+    @param var_to_lines Mapping of variable name --> line number. Created when you analyze the initial Perl file
+    @param line_to_vars Mapping of line number --> variable name. Created when you analyze the initial perl file
+    @param perl_params Parameters for running the Perl file
+    @returns A string detailing the tainted environment variable
+    '''
+    # Use regexp to extract the line that is tainted from the variable
+    # The line # doesn't really matter but it's nice to have so we can prepend stuff later down the line
+    tainted_env_regex = r"Insecure \$ENV{.*line.+\."
+    taint_err_group = re.search(tainted_env_regex, taint_error).group(0)
+    tainted_line = int(taint_err_group[taint_err_group.index("line ") + 5 :taint_err_group.index(".", taint_err_group.index("line "))])
+
+    # Extract the exact environment variable that is tainted
+    tainted_var = taint_err_group[taint_err_group.index("$ENV") : taint_err_group.index("}", taint_err_group.index("$ENV")) + 1]
+    # print(f"Environment variable {tainted_var} is tainted on line {tainted_line}")
+
+    # Temporarily sanitize the environment variable
+    # Everything will be set to '' except for PATH since that is the only real thing we need to run stuff
+    detainting_scripts = ""
+
+    if (tainted_var == "$ENV{PATH}"):
+        detainting_scripts = "$ENV{PATH} = '/usr/bin:/bin';"
+    else:
+        detainting_scripts = f"{tainted_var} = '';"
+
+    # Write the temporary debug script to the shadow file
+    create_shadow_file(shadow_file_name, [(tainted_line, detainting_scripts)], [], shadow_file_test_name)
+    os.remove(shadow_file_name)
+    os.rename(shadow_file_test_name, shadow_file_name)
+
+    # Write an executive summary
+    summary = f"----------\nEnvironment variable {tainted_var} is tainted. Make sure to constrain it."
+    return summary
 
 # --------------- Taint Check for a perl file --------------------------------------
 def taint_check(perl_filename: str, perl_params: list[str]) -> str:
@@ -324,7 +364,9 @@ def taint_check(perl_filename: str, perl_params: list[str]) -> str:
 
 def runner(perl_filename: str, perl_params: list[str], var_to_lines:dict[str, list[int]], line_to_vars:dict[int, list[str]]):
     taint_err = taint_check(perl_filename, perl_params)
-    while len(taint_err) != 0:
+    # Not the cleanest solution but python byte strings are annoying and won't return properly
+    # So we're jamming this in
+    while str(taint_err) != "b''":
 
         # Check taint
         taint_err_cleaned = taint_err
@@ -332,9 +374,9 @@ def runner(perl_filename: str, perl_params: list[str], var_to_lines:dict[str, li
 
         print(taint_err_msg)
 
-        # # Recalculate taint
-        # taint_err = taint_check(perl_filename, perl_params)
-        break
+        # Recalculate taint
+        taint_err = taint_check(perl_filename, perl_params)
+
     return
 
 # ---- Main processing code ------
@@ -350,6 +392,9 @@ def main():
 
     # Run it
     runner(shadow_file_name, sys.argv[2:], var_to_lines, line_to_vars)
+
+    # Remove shadow file
+    os.remove(shadow_file_name)
 
 # Command Line Interface
 if __name__ == "__main__":
