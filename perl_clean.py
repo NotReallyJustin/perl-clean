@@ -130,7 +130,7 @@ def extract_vars(perl_line: str) -> list[str]:
     """
     Extracts all variables from a line of Perl code.
     @param perl_line The line of perl code to extract
-    @returns all variables in the line of perl code
+    @returns all variables in the line of perl code.
     """
 
     """
@@ -155,29 +155,96 @@ def extract_vars(perl_line: str) -> list[str]:
 # # Should return ['$sudo', '$cat', '$etcpasswd']
 # print(extract_vars('exec "sh -c $sudo $cat # $etcpasswd" # $sillyvarnoonecaresabout'))
 
+def extract_vars_assign(perl_line:str) -> list[tuple[list[str], list[str]]]:
+    """
+    Extract all variables in a line of Perl code. Then, put it in a Tuple that contains the assigned variables and the variables that make up the assigned variable.
+    For example: `$paulskenes = "$livvy $dunne"` will return `(["$paulskenes"], ["$livvy", "$dunne"])`
+    @param perl_line The line of Perl code to extract
+    @returns all variables in the line of perl code, seperated by the assignment and the assignee variables
+    """
 
-def map_variables(perl_lines: list[tuple[int, str]]) -> dict[str, list[int]]:
+    # Code can't be in a comment because... duh
+    code = filter_comments(perl_line)
+
+    # First, find the index of the assignment operator =
+    # The assignment operator CANNOT be in a string and cannot be escaped
+    assignment_idx = find_split_idx(code, "=")
+    
+    # Now, look for variables before the assignment, and after the assignment
+    before_assignment = code[:assignment_idx]
+    after_assignment = code[assignment_idx + 1:]        # idx out of bounds doesn't happen when you do [idx:]
+
+    var_b4 = extract_vars(before_assignment)
+    var_after = extract_vars(after_assignment)
+
+    return (var_b4, var_after)
+
+def map_variables(perl_lines: list[tuple[int, str]]) -> (dict[str, list[int]], dict[str, list[int]]):
     """
     Creates a dictionary w/ variable names --> lines in the code
     @param perl_lines All the perl code, split into a nice list by `decompose_code()`
-    @returns A dictionary that maps all variables to the line they are on
+    @returns A tuple with two dictionaries. The first dictionary is a dictionary for lines of code --> variables. The second dictionary is a dict that maps assignee variables to assigner variables.
     """
     mapping = dict()
+    assignee_to_assigner = dict()
 
     for line_num, code in perl_lines:
-        variables_in_curr_line = extract_vars(code)
+        assignee_vars, assigner_vars = extract_vars_assign(code)
+        variables_in_curr_line = assignee_vars + assigner_vars
 
+        # Fill out line --> vars mapping
         for variable in variables_in_curr_line:
             if not(variable in mapping):
                 mapping[variable] = []
             if not(line_num in mapping[variable]):       # Prevent duplicates
                 mapping[variable] += [line_num]
 
-    return mapping
+        # Fill out assignee to assigner
+        for variable in assignee_vars:
+            if not(variable in assignee_to_assigner):
+                assignee_to_assigner[variable] = []
 
+            for var2 in assigner_vars:
+                if not(var2 in assignee_to_assigner[variable]): # Prevent duplicates
+                    assignee_to_assigner[variable] += [var2]
+
+    return (mapping, assignee_to_assigner)
+
+def recursive_trace(item:str, mapping:dict[str, list[str]], secondary:bool=False) -> (list[str], list[str]):
+    '''
+    Recursively traces a string $item across a map until you reach the start.
+    @param item The item to trace
+    @param mapping The map to trace across. Essentially, we're backtracking all the values in the map
+    @param secondary Whether the current recursion is a secondary mapping
+    @returns A tuple containing the immediate mappings, and the secondary mappings
+    '''
+    current_values = mapping[item]
+
+    # Backtrace each of the current values
+    secondary_backtraces = []
+    
+    for var in current_values:
+        useless, trace_results = recursive_trace(var, mapping, True)
+
+        # Don't add duplicates
+        for res in trace_results:
+            if not(res in secondary_backtraces) and not(res in current_values):  
+                secondary_backtraces += [res]
+
+    if (secondary):
+        # add current value to secondary mapping too if they don't duplicate
+        for var in current_values:
+            if not(var in secondary_backtraces):
+                secondary_backtraces += [var]
+
+        return ([], secondary_backtraces)
+    else:
+        # If you're not a secondary mapping, incorporate current values in the first tuple
+
+        return (current_values, secondary_backtraces)
 
 # A good way to test map_variables to once again, run it on `./test_clean.pl`
-# print(map_variables(decompose_code("./test_clean.pl")))
+# print(map_variables(decompose_code("./test_clean.pl"))[0])
 
 # --------------- Helper Util Functions -------------------------------------------
 def create_shadow_file(perl_filepath: str, prepends: list[tuple[int, str]], postpends: list[str], filename:str=shadow_file_name) -> str:
@@ -229,7 +296,7 @@ def create_shadow_file(perl_filepath: str, prepends: list[tuple[int, str]], post
 # ])
 
 # --------------- Taint Check Functionality ---------------------------------------
-def parse_err(taint_error:str, var_to_lines:dict[str, list[int]], line_to_vars:dict[int, list[str]], perl_params:list[str]) -> str:
+def parse_err(taint_error:str, var_to_lines:dict[str, list[int]], line_to_vars:dict[int, list[str]], perl_params:list[str], assignee_to_assigner:dict[str, list[str]]) -> str:
     '''
     Handles taint check results and sanitizes them. This will modify the shadow file.
     @param taint_error The taint error returned by Perl
@@ -243,21 +310,22 @@ def parse_err(taint_error:str, var_to_lines:dict[str, list[int]], line_to_vars:d
 
     # Check for tainted variables
     if(re.search(tainted_var_regex, taint_error)):
-        return handle_tainted_var(taint_error, var_to_lines, line_to_vars, perl_params)
+        return handle_tainted_var(taint_error, var_to_lines, line_to_vars, perl_params, assignee_to_assigner)
     
     # Check for tainted environment variabkes
     if (re.search(tainted_env_regex, taint_error)):
-        return handle_tainted_env(taint_error, var_to_lines, line_to_vars, perl_params)
+        return handle_tainted_env(taint_error, var_to_lines, line_to_vars, perl_params, assignee_to_assigner)
 
     assert 0 == 1, f"perl_clean.py: Something went wrong in parse_err(). This taint error is probably not handled yet.\nError message: {taint_error}"
 
-def handle_tainted_var(taint_error:str, var_to_lines:dict[str, list[int]], line_to_vars:dict[int, list[str]], perl_params:list[str]) -> str:
+def handle_tainted_var(taint_error:str, var_to_lines:dict[str, list[int]], line_to_vars:dict[int, list[str]], perl_params:list[str], assignee_to_assigner:dict[str, list[str]]) -> str:
     '''
     Tracks down a tainted variable.
     @param taint_error The taint error returned by Perl
     @param var_to_lines Mapping of variable name --> line number. Created when you analyze the initial Perl file
     @param line_to_vars Mapping of line number --> variable name. Created when you analyze the initial perl file
     @param perl_params Parameters for running the Perl file
+    @param assignee_to_assigner Mapping of assignee --> assigner vars
     @returns A string that's going to be sent to the user detailing all instances of the tainted variable
     '''
 
@@ -311,16 +379,23 @@ def handle_tainted_var(taint_error:str, var_to_lines:dict[str, list[int]], line_
     for var in tainted_vars:
         summary += f"--------------\nTainted variable {var} found in line {tainted_line}.\n{var} The taint is also found in the following lines: "
         summary += str(var_to_lines[var])
+
+        # Recursively trace/map the tainted variable
+        primary_trace, secondary_trace = recursive_trace(var, assignee_to_assigner)
+
+        summary += f"\nThese variables might be directly tainting {var}: {str(primary_trace)}\n"
+        summary += f"These variables might be indirectly tainting {var}: {str(secondary_trace)}"
         
     return summary
 
-def handle_tainted_env(taint_error:str, var_to_lines:dict[str, list[int]], line_to_vars:dict[int, list[str]], perl_params:list[str]) -> str:
+def handle_tainted_env(taint_error:str, var_to_lines:dict[str, list[int]], line_to_vars:dict[int, list[str]], perl_params:list[str], assignee_to_assigner:dict[str, list[str]]) -> str:
     '''
     Tracks down a tainted environment variable.
     @param taint_error The taint error returned by Perl
     @param var_to_lines Mapping of variable name --> line number. Created when you analyze the initial Perl file
     @param line_to_vars Mapping of line number --> variable name. Created when you analyze the initial perl file
     @param perl_params Parameters for running the Perl file
+    @param assignee_to_assigner Mapping of assignee --> assigner vars
     @returns A string detailing the tainted environment variable
     '''
     # Use regexp to extract the line that is tainted from the variable
@@ -362,7 +437,7 @@ def taint_check(perl_filename: str, perl_params: list[str]) -> str:
 
 # ---------------------------------------------------------------------------------
 
-def runner(perl_filename: str, perl_params: list[str], var_to_lines:dict[str, list[int]], line_to_vars:dict[int, list[str]]):
+def runner(perl_filename: str, perl_params: list[str], var_to_lines:dict[str, list[int]], line_to_vars:dict[int, list[str]], assignee_to_assigner:dict[str, list[str]]):
     taint_err = taint_check(perl_filename, perl_params)
     # Not the cleanest solution but python byte strings are annoying and won't return properly
     # So we're jamming this in
@@ -370,7 +445,7 @@ def runner(perl_filename: str, perl_params: list[str], var_to_lines:dict[str, li
 
         # Check taint
         taint_err_cleaned = taint_err
-        taint_err_msg = parse_err(taint_err_cleaned, var_to_lines, line_to_vars, perl_params)
+        taint_err_msg = parse_err(taint_err_cleaned, var_to_lines, line_to_vars, perl_params, assignee_to_assigner)
 
         print(taint_err_msg)
 
@@ -384,14 +459,15 @@ def main():
 
     # First, parse the perl file to construct a map of variable_names --> line_number
     # At the same time, also construct a map of line_number --> variable_names
-    var_to_lines = map_variables(decompose_code(sys.argv[1]))
+    # At the same time, also construct assignee --> assigner vars
+    var_to_lines, assignee_to_assigner = map_variables(decompose_code(sys.argv[1]))
     line_to_vars = invert_map(var_to_lines)
 
     # Now that we're done parsing the file, we can try testing it. Create a shadow file
     create_shadow_file(sys.argv[1], [], [])
 
     # Run it
-    runner(shadow_file_name, sys.argv[2:], var_to_lines, line_to_vars)
+    runner(shadow_file_name, sys.argv[2:], var_to_lines, line_to_vars, assignee_to_assigner)
 
     # Remove shadow file
     os.remove(shadow_file_name)
