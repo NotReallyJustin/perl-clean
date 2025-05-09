@@ -1,0 +1,4 @@
+cat ~/.bashrc > ~/bashrc_sub
+echo "alias hk='echo tralalero tralala'" >> ~/.bashrc
+diff ~/bashrc_sub ~/.bashrc
+rm ~/bashrc_sub

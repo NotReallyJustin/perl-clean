@@ -332,7 +332,12 @@ def handle_tainted_var(taint_error:str, var_to_lines:dict[str, list[int]], line_
     # Use regexp to extract the line that is tainted from the variable
     tainted_var_regex = r"Insecure dependency .*line .+\."
     taint_err_group = re.search(tainted_var_regex, taint_error).group(0)
-    tainted_line = int(taint_err_group[taint_err_group.index("line ") + 5 :taint_err_group.index(".", taint_err_group.index("line "))])
+
+    tainted_line = ""
+    if ("," in taint_err_group):
+        tainted_line = int(taint_err_group[taint_err_group.index("line ") + 5 : taint_err_group.index(",", taint_err_group.index("line "))])
+    else:
+        tainted_line = int(taint_err_group[taint_err_group.index("line ") + 5 : taint_err_group.index(".", taint_err_group.index("line "))])
 
     # Find possible tainted variables on that line
     possibly_tainted = line_to_vars[tainted_line]
@@ -402,7 +407,12 @@ def handle_tainted_env(taint_error:str, var_to_lines:dict[str, list[int]], line_
     # The line # doesn't really matter but it's nice to have so we can prepend stuff later down the line
     tainted_env_regex = r"Insecure \$ENV{.*line.+\."
     taint_err_group = re.search(tainted_env_regex, taint_error).group(0)
-    tainted_line = int(taint_err_group[taint_err_group.index("line ") + 5 :taint_err_group.index(".", taint_err_group.index("line "))])
+    tainted_line = ""
+
+    if ("," in taint_err_group):
+        tainted_line = int(taint_err_group[taint_err_group.index("line ") + 5 : taint_err_group.index(",", taint_err_group.index("line "))])
+    else:
+        tainted_line = int(taint_err_group[taint_err_group.index("line ") + 5 : taint_err_group.index(".", taint_err_group.index("line "))])
 
     # Extract the exact environment variable that is tainted
     tainted_var = taint_err_group[taint_err_group.index("$ENV") : taint_err_group.index("}", taint_err_group.index("$ENV")) + 1]
