@@ -1,6 +1,11 @@
 # perl-clean
 Automated tool to completely and verbosely run perlsec taint analysis on Perl Code. <br /> <br />
-CS810 Project by Justin Chen and Dan Liu <br />
+**Creators**: Justin Chen & Dan Liu <br /> <br />
+
+Before: <br />
+![Screenshot 2025-05-09 002611](https://github.com/user-attachments/assets/e13fb484-e63c-425f-8743-f4b310b9b22d) <br />
+
+After: <br />
 ![Screenshot 2025-05-09 012919](https://github.com/user-attachments/assets/0dfd6a51-18f3-449c-84f1-025c5fc93dee)
 
 ## Overview
